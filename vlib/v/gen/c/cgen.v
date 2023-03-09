@@ -2260,8 +2260,7 @@ fn (mut g Gen) expr_with_cast(expr ast.Expr, got_type_raw ast.Type, expected_typ
 		return
 	}
 	if got_sym.info !is ast.Interface && exp_sym.info is ast.Interface
-		&& got_type.idx() != expected_type.idx() && !expected_type.has_flag(.option)
-		&& !expected_type.has_flag(.result) {
+		&& got_type.idx() != expected_type.idx() && !expected_type.has_flag(.result) {
 		if expr is ast.StructInit && !got_type.is_ptr() {
 			g.inside_cast_in_heap++
 			got_styp := g.cc_type(got_type.ref(), true)
@@ -4094,7 +4093,7 @@ fn (mut g Gen) ident(node ast.Ident) {
 		if node.obj is ast.Var {
 			if !g.is_assign_lhs && node.obj.is_comptime_field {
 				if g.comptime_for_field_type.has_flag(.option) {
-					if (g.inside_opt_or_res && node.or_expr.kind == .absent) || g.left_is_opt {
+					if (g.inside_opt_or_res || g.left_is_opt) && node.or_expr.kind == .absent {
 						g.write('${name}')
 					} else {
 						g.write('/*opt*/')
@@ -4104,7 +4103,8 @@ fn (mut g Gen) ident(node ast.Ident) {
 				} else {
 					g.write('${name}')
 				}
-				if node.or_expr.kind != .absent {
+				if node.or_expr.kind != .absent && !(g.inside_opt_or_res && g.inside_assign
+					&& !g.is_assign_lhs) {
 					stmt_str := g.go_before_stmt(0).trim_space()
 					g.empty_line = true
 					g.or_block(name, node.or_expr, g.comptime_for_field_type)
@@ -4118,14 +4118,15 @@ fn (mut g Gen) ident(node ast.Ident) {
 		// `x = new_opt()` => `x = new_opt()` (g.right_is_opt == true)
 		// `println(x)` => `println(*(int*)x.data)`
 		if node.info.is_option && !(g.is_assign_lhs && g.right_is_opt) {
-			if (g.inside_opt_or_res && node.or_expr.kind == .absent) || g.left_is_opt {
+			if (g.inside_opt_or_res || g.left_is_opt) && node.or_expr.kind == .absent {
 				g.write('${name}')
 			} else {
 				g.write('/*opt*/')
 				styp := g.base_type(node.info.typ)
 				g.write('(*(${styp}*)${name}.data)')
 			}
-			if node.or_expr.kind != .absent && !(g.inside_assign && !g.is_assign_lhs) {
+			if node.or_expr.kind != .absent && !(g.inside_opt_or_res && g.inside_assign
+				&& !g.is_assign_lhs) {
 				stmt_str := g.go_before_stmt(0).trim_space()
 				g.empty_line = true
 				g.or_block(name, node.or_expr, node.info.typ)
@@ -4563,6 +4564,7 @@ fn (mut g Gen) return_stmt(node ast.Return) {
 	ret_typ := g.typ(g.unwrap_generic(fn_ret_type))
 	mut use_tmp_var := g.defer_stmts.len > 0 || g.defer_profile_code.len > 0
 		|| g.cur_lock.lockeds.len > 0
+		|| (fn_return_is_multi && node.exprs.len >= 1 && fn_return_is_option)
 	// handle promoting none/error/function returning _option'
 	if fn_return_is_option {
 		option_none := node.exprs[0] is ast.None
@@ -4586,6 +4588,17 @@ fn (mut g Gen) return_stmt(node ast.Return) {
 			g.gen_option_error(fn_ret_type, node.exprs[0])
 			g.writeln(';')
 			if use_tmp_var {
+				// handle options when returning `none` for `?(int, ?int)`
+				if fn_return_is_multi && node.exprs.len >= 1 {
+					mr_info := sym.info as ast.MultiReturn
+					for i in 0 .. mr_info.types.len {
+						if mr_info.types[i].has_flag(.option) {
+							g.write('(*(${g.base_type(fn_ret_type)}*)${tmpvar}.data).arg${i} = ')
+							g.gen_option_error(mr_info.types[i], ast.None{})
+							g.writeln(';')
+						}
+					}
+				}
 				g.write_defer_stmts_when_needed()
 				g.writeln('return ${tmpvar};')
 			}
@@ -4631,8 +4644,7 @@ fn (mut g Gen) return_stmt(node ast.Return) {
 			g.writeln('return ${tmpvar};')
 			return
 		}
-		typ_sym := g.table.sym(g.fn_decl.return_type)
-		mr_info := typ_sym.info as ast.MultiReturn
+		mr_info := sym.info as ast.MultiReturn
 		mut styp := ''
 		if fn_return_is_option {
 			g.writeln('${ret_typ} ${tmpvar};')
@@ -4699,10 +4711,11 @@ fn (mut g Gen) return_stmt(node ast.Return) {
 			} else {
 				g.expr(expr)
 			}
-			arg_idx++
+
 			if i < node.exprs.len - 1 {
 				g.write(', ')
 			}
+			arg_idx++
 		}
 		g.write('}')
 		if fn_return_is_option {
