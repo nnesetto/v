@@ -6,7 +6,7 @@ The [gitly](https://gitly.org/) site is based on vweb.
 
 **_Some features may not be complete, and have some bugs._**
 
-## Getting start
+## Quick Start
 Just run **`v new <name> web`** in your terminal
 
 ## Features
@@ -16,6 +16,7 @@ Just run **`v new <name> web`** in your terminal
 - **Easy to deploy** just one binary file that also includes all templates. No need to install any
   dependencies.
 - **Templates are precompiled** all errors are visible at compilation time, not at runtime.
+- **Multithreaded** by default
 
 ### Examples
 
@@ -378,6 +379,212 @@ pub fn (mut app App) with_auth() bool {
 }
 ```
 
+### Fallback route
+You can implement a fallback `not_found` route that is called when a request is made and no 
+matching route is found.
+
+**Example:**
+
+``` v ignore
+pub fn (mut app App) not_found() vweb.Result {
+	app.set_status(404, 'Not Found')
+	return app.html('<h1>Page not found</h1>')
+}
+```
+
+### Databases
+The `db` field in a vweb app is reserved for database connections. The connection is 
+copied to each new request.
+
+**Example:**
+
+```v
+module main
+
+import vweb
+import db.sqlite
+
+struct App {
+	vweb.Context
+mut:
+	db sqlite.DB
+}
+
+fn main() {
+	// create the database connection
+	mut db := sqlite.connect('db')!
+
+	vweb.run(&App{
+		db: db
+	}, 8080)
+}
+```
+
+### Multithreading
+By default, a vweb app is multithreaded, that means that multiple requests can
+be handled in parallel by using multiple CPU's: a worker pool. You can 
+change the number of workers (maximum allowed threads) by altering the `nr_workers`
+option. The default behaviour is to use the maximum number of jobs (cores in most cases).
+
+**Example:**
+```v ignore
+fn main() {
+	// assign a maximum of 4 workers
+	vweb.run_at(&App{}, nr_workers: 4)
+}
+```
+
+#### Database Pool
+A single connection database works fine if you run your app with 1 worker, of if
+you access a file-based database like a sqlite file.
+
+This approach will fail when using a non-file based database connection like a mysql
+connection to another server somewhere on the internet. Multiple threads would need to access
+the same connection at the same time.
+
+To resolve this issue, you can use the vweb's built-in database pool. The database pool
+will keep a number of connections open when the app is started and each worker is
+assigned its own connection.
+
+Let's look how we can improve our previous example with database pooling and using a 
+postgresql server instead.
+
+**Example:**
+```v
+module main
+
+import vweb
+import db.pg
+
+struct App {
+	vweb.Context
+	db_handle vweb.DatabasePool[pg.DB]
+mut:
+	db pg.DB
+}
+
+fn get_database_connection() pg.DB {
+	// insert your own credentials
+	return pg.connect(user: 'user', password: 'password', dbname: 'database') or { panic(err) }
+}
+
+fn main() {
+	// create the database pool and pass our `get_database_connection` function as handler
+	pool := vweb.database_pool(handler: get_database_connection)
+
+	// no need to set the `db` field
+	vweb.run(&App{
+		db_handle: pool
+	}, 8080)
+}
+```
+
+If you don't use the default number of workers (`nr_workers`) you have to change 
+it to the same number in `vweb.run_at` as in `vweb.database_pool`
+
+### Extending the App struct with `[vweb_global]`
+You can change your `App` struct however you like, but there are some things you
+have to keep in mind. Under the hood at each request a new instance of `App` is
+constructed, and all fields are re-initialized with their default type values, 
+except for the `db` field. 
+
+This behaviour ensures that each request is treated equally and in the same context, but
+problems arise when we want to provide more context than just the default `vweb.Context`.
+
+Let's view the following example where we want to provide a secret token to our app:
+
+```v
+module main
+
+import vweb
+
+struct App {
+	vweb.Context
+	secret string
+}
+
+fn main() {
+	vweb.run(&App{
+		secret: 'my secret'
+	}, 8080)
+}
+
+fn (mut app App) index() vweb.Result {
+	return app.text('My secret is: ${app.secret}')
+}
+```
+
+When you visit `localhost:8080/` you would expect to see the text 
+`"My secret is: my secret"`, but instead there is only the text 
+`"My secret is: "`. This is because of the way vweb works. We can override the default
+behaviour by adding the attribute `[vweb_global]` to the `secret` field.
+
+**Example:**
+```v ignore
+struct App {
+	vweb.Context
+	secret string [vweb_global]
+}
+```
+
+Now if you visit `localhost:8080/` you see the text `"My secret is: my secret"`.
+> **Note**: the value of `secret` gets initialized with the provided value when creating
+> `App`. If you would modify `secret` in one request the value won't be changed in the
+> next request. You can use shared fields for this.
+
+### Shared Objects across requests
+We saw in the previous section that we can persist data across multiple requests, 
+but what if we want to be able to mutate the data? Since vweb works with threads, 
+we have to use `shared` fields.
+
+Let's see how we can add a visitor counter to our `App`.
+
+**Example:**
+```v
+module main
+
+import vweb
+
+struct Counter {
+pub mut:
+	count int
+}
+
+struct App {
+	vweb.Context
+mut:
+	counter shared Counter // shared fields can only be structs, arrays or maps.
+}
+
+fn main() {
+	// initialize the shared object
+	shared counter := Counter{
+		count: 0
+	}
+
+	vweb.run(&App{
+		counter: counter
+	}, 8080)
+}
+
+fn (mut app App) index() vweb.Result {
+	mut count := 0
+	// lock the counter so we can modify it
+	lock app.counter {
+		app.counter.count += 1
+		count = app.counter.count
+	}
+	return app.text('Total visitors: ${count}')
+}
+```
+
+#### Drawback of Shared Objects
+The drawback of using shared objects is that it affects performance. In the previous example
+`App.counter` needs to be locked each time the page is loaded if there are simultaneous
+requests the next requests will have to wait for the lock to be released.
+
+It is best practice to limit the use of shared objects as much as possible.
+
 ### Controllers
 Controllers can be used to split up app logic so you are able to have one struct 
 per `"/"`.  E.g. a struct `Admin` for urls starting with `"/admin"` and a struct `Foo`
@@ -445,7 +652,8 @@ There will be an error, because the controller `Admin` handles all routes starti
 
 #### Databases and `[vweb_global]` in controllers
 
-Fields with `[vweb_global]` like a database have to passed to each controller individually.
+Fields with `[vweb_global]` have to passed to each controller individually.
+The `db` field is unique and will be treated as a `vweb_global` field at all times.
 
 **Example:**
 ```v
@@ -457,14 +665,14 @@ import db.sqlite
 struct App {
 	vweb.Context
 	vweb.Controller
-pub mut:
-	db sqlite.DB [vweb_global]
+mut:
+	db sqlite.DB
 }
 
 struct Admin {
 	vweb.Context
-pub mut:
-	db sqlite.DB [vweb_global]
+mut:
+	db sqlite.DB
 }
 
 fn main() {
@@ -475,6 +683,50 @@ fn main() {
 		controllers: [
 			vweb.controller('/admin', &Admin{
 				db: db
+			}),
+		]
+	}
+}
+```
+
+#### Using a database pool
+
+**Example:**
+```v
+module main
+
+import vweb
+import db.pg
+
+struct App {
+	vweb.Context
+	vweb.Controller
+	db_handle vweb.DatabasePool[pg.DB]
+mut:
+	db pg.DB
+}
+
+struct Admin {
+	vweb.Context
+	db_handle vweb.DatabasePool[pg.DB]
+mut:
+	db pg.DB
+}
+
+fn get_database_connection() pg.DB {
+	// insert your own credentials
+	return pg.connect(user: 'user', password: 'password', dbname: 'database') or { panic(err) }
+}
+
+fn main() {
+	// create the database pool and pass our `get_database_connection` function as handler
+	pool := vweb.database_pool(handler: get_database_connection)
+
+	mut app := &App{
+		db_handle: pool
+		controllers: [
+			vweb.controller('/admin', &Admin{
+				db_handle: pool
 			}),
 		]
 	}

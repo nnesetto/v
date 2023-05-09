@@ -154,7 +154,7 @@ fn (mut c Checker) check_types(got ast.Type, expected ast.Type) bool {
 			&& expected.has_flag(.result)) {
 			// IError
 			return true
-		} else if !c.check_basic(got, expected.clear_flag(.option).clear_flag(.result)) {
+		} else if !c.check_basic(got, expected.clear_flags(.option, .result)) {
 			return false
 		}
 	}
@@ -905,7 +905,8 @@ fn (mut c Checker) infer_fn_generic_types(func ast.Fn, mut node ast.CallExpr) {
 					}
 				}
 
-				if arg.expr.is_auto_deref_var() {
+				if arg.expr.is_auto_deref_var() || (arg.expr is ast.ComptimeSelector
+					&& (arg.expr as ast.ComptimeSelector).left.is_auto_deref_var()) {
 					typ = typ.deref()
 				}
 				// resolve &T &&T ...
@@ -1013,8 +1014,8 @@ fn (mut c Checker) infer_fn_generic_types(func ast.Fn, mut node ast.CallExpr) {
 					&& c.table.cur_fn.params.len > 0 && func.generic_names.len > 0
 					&& arg.expr is ast.Ident {
 					var_name := (arg.expr as ast.Ident).name
-					for cur_param in c.table.cur_fn.params {
-						if !cur_param.typ.has_flag(.generic) || cur_param.name != var_name {
+					for k, cur_param in c.table.cur_fn.params {
+						if !cur_param.typ.has_flag(.generic) || k < gi || cur_param.name != var_name {
 							continue
 						}
 						typ = cur_param.typ

@@ -1,7 +1,9 @@
+// Copyright (c) 2023 l-m.dev. All rights reserved.
+// Use of this source code is governed by an MIT license
+// that can be found in the LICENSE file.
 module wasm
 
 import encoding.leb128
-import math.bits
 
 fn (mut func Function) u32(v u32) {
 	func.code << leb128.encode_u32(v)
@@ -23,13 +25,85 @@ fn (mut func Function) blocktype(typ FuncType) {
 	func.code << leb128.encode_i32(tidx)
 }
 
+pub type PatchPos = int
+
+// patch_pos returns a `PatchPos` for use with `patch`.
+pub fn (func Function) patch_pos() PatchPos {
+	return func.code.len
+}
+
+// patch "patches" the code generated starting from the last `patch_pos` call in `begin` to `loc`.
+//
+// ```v
+// start := func.patch_pos()
+//
+// ...
+//
+// patch_block := func.patch_pos()
+// {
+//     func.i32_const(10)
+//     func.local_set(idx)
+// }
+// func.patch(start, patch_block) // will patch code to the `start`.
+// // func.code[patch_block..]
+// ```
+pub fn (mut func Function) patch(loc PatchPos, begin PatchPos) {
+	if loc == begin {
+		return
+	}
+	assert loc < begin
+
+	v := func.code[begin..].clone()
+	func.code.trim(begin)
+	func.code.insert(int(loc), v)
+
+	for mut patch in func.patches {
+		if patch.pos >= begin {
+			patch.pos -= begin - loc
+		} else if patch.pos >= loc {
+			patch.pos += func.code.len - begin
+		}
+	}
+
+	func.patches.sort(a.pos < b.pos)
+
+	/*
+	lenn := begin
+	diff := loc - begin
+
+	for mut patch in func.patches {
+		if patch.pos >= begin {
+			patch.pos += diff
+		}
+		if patch.pos <= lenn {
+			continue
+		}
+		delta := patch.pos - lenn
+		patch.pos = loc + delta
+	}
+
+	func.patches.sort(a.pos < b.pos)*/
+}
+
 // new_local creates a function local and returns it's index.
 // See `local_get`, `local_set`, `local_tee`.
-pub fn (mut func Function) new_local(v ValType) int {
-	ldiff := func.mod.functypes[func.tidx].parameters.len
-	ret := func.locals.len + ldiff
+pub fn (mut func Function) new_local(v ValType) LocalIndex {
+	ret := func.locals.len
+	func.locals << FunctionLocal{
+		typ: v
+	}
+	return ret
+}
 
-	func.locals << v
+// new_local_named creates a function local with a name and returns it's index.
+// The `name` is used in debug information, where applicable.
+// See `local_get`, `local_set`, `local_tee`.
+pub fn (mut func Function) new_local_named(v ValType, name string) LocalIndex {
+	ret := func.locals.len
+	func.locals << FunctionLocal{
+		typ: v
+		name: name
+	}
 	return ret
 }
 
@@ -51,47 +125,71 @@ pub fn (mut func Function) i64_const(v i64) {
 // WebAssembly instruction: `f32.const`.
 pub fn (mut func Function) f32_const(v f32) {
 	func.code << 0x43 // f32.const
-	rv := bits.f32_bits(v)
-	func.code << u8(rv >> u32(0))
-	func.code << u8(rv >> u32(8))
-	func.code << u8(rv >> u32(16))
-	func.code << u8(rv >> u32(24))
+	push_f32(mut func.code, v)
 }
 
 // f64_const places a constant f64 value on the stack.
 // WebAssembly instruction: `f64.const`.
 pub fn (mut func Function) f64_const(v f64) {
 	func.code << 0x44 // f64.const
-	rv := bits.f64_bits(v)
-	func.code << u8(rv >> u32(0))
-	func.code << u8(rv >> u32(8))
-	func.code << u8(rv >> u32(16))
-	func.code << u8(rv >> u32(24))
-	func.code << u8(rv >> u32(32))
-	func.code << u8(rv >> u32(40))
-	func.code << u8(rv >> u32(48))
-	func.code << u8(rv >> u32(56))
+	push_f64(mut func.code, v)
 }
 
 // local_get places the value of the local at the index `local` on the stack.
 // WebAssembly instruction: `local.get`.
-pub fn (mut func Function) local_get(local int) {
+pub fn (mut func Function) local_get(local LocalIndex) {
 	func.code << 0x20 // local.get
 	func.u32(u32(local))
 }
 
 // local_get sets the local at the index `local` to the value on the stack.
 // WebAssembly instruction: `local.set`.
-pub fn (mut func Function) local_set(local int) {
+pub fn (mut func Function) local_set(local LocalIndex) {
 	func.code << 0x21 // local.set
 	func.u32(u32(local))
 }
 
 // local_tee sets the local at the index `local` to the value on the stack, then places it's value on the stack.
 // WebAssembly instruction: `local.tee`.
-pub fn (mut func Function) local_tee(local int) {
+pub fn (mut func Function) local_tee(local LocalIndex) {
 	func.code << 0x22 // local.tee
 	func.u32(u32(local))
+}
+
+type GlobalIndices = GlobalImportIndex | GlobalIndex
+
+// global_get places the value of the global at the index `global` on the stack.
+// WebAssembly instruction: `global.get`.
+pub fn (mut func Function) global_get(global GlobalIndices) {
+	func.code << 0x23 // global.get
+	match global {
+		GlobalIndex {
+			func.patches << FunctionGlobalPatch{
+				idx: global
+				pos: func.code.len
+			}
+		}
+		GlobalImportIndex {
+			func.u32(u32(global))
+		}
+	}
+}
+
+// global_set sets the global at the index `global` to the value on the stack.
+// WebAssembly instruction: `global.set`.
+pub fn (mut func Function) global_set(global GlobalIndices) {
+	func.code << 0x24 // global.set
+	match global {
+		GlobalIndex {
+			func.patches << FunctionGlobalPatch{
+				idx: global
+				pos: func.code.len
+			}
+		}
+		GlobalImportIndex {
+			func.u32(u32(global))
+		}
+	}
 }
 
 // drop drops the value on the stack
@@ -775,20 +873,22 @@ pub fn (mut func Function) nop() {
 	func.code << 0x01
 }
 
+pub type LabelIndex = int
+
 // c_block creates a label that can later be branched out of with `c_br` and `c_br_if`.
 // Blocks are strongly typed, you must supply a list of types for `parameters` and `results`.
 // All blocks must be ended, see the `c_end` function.
-pub fn (mut func Function) c_block(parameters []ValType, results []ValType) int {
+pub fn (mut func Function) c_block(parameters []ValType, results []ValType) LabelIndex {
 	func.label++
 	func.code << 0x02
 	func.blocktype(parameters: parameters, results: results)
 	return func.label
 }
 
-// c_loop creates a label that can later be branched to of with `c_br` and `c_br_if`.
+// c_loop creates a label that can later be branched to with `c_br` and `c_br_if`.
 // Loops are strongly typed, you must supply a list of types for `parameters` and `results`.
 // All loops must be ended, see the `c_end` function.
-pub fn (mut func Function) c_loop(parameters []ValType, results []ValType) int {
+pub fn (mut func Function) c_loop(parameters []ValType, results []ValType) LabelIndex {
 	func.label++
 	func.code << 0x03
 	func.blocktype(parameters: parameters, results: results)
@@ -796,16 +896,20 @@ pub fn (mut func Function) c_loop(parameters []ValType, results []ValType) int {
 }
 
 // c_if opens an if expression. It executes a statement if the last item on the stack is true.
+// It creates a label that can later be branched out of with `c_br` and `c_br_if`.
 // If expressions are strongly typed, you must supply a list of types for `parameters` and `results`.
 // Call `c_else` to open the else case of an if expression, or close it by calling `c_end_if`.
-// All if expressions must be ended by calling with `c_end_if.
-pub fn (mut func Function) c_if(parameters []ValType, results []ValType) {
+// All if expressions must be ended, see the `c_end` function.
+pub fn (mut func Function) c_if(parameters []ValType, results []ValType) LabelIndex {
+	func.label++
 	func.code << 0x04
 	func.blocktype(parameters: parameters, results: results)
+	return func.label
 }
 
-// c_else starts the else case of an if expression, it must be closed by calling `c_end_if`.
-pub fn (mut func Function) c_else() {
+// c_else opens the else case of an if expression, it must be closed by calling `c_end`.
+pub fn (mut func Function) c_else(label LabelIndex) {
+	assert func.label == label, 'c_else: called with an invalid label ${label}'
 	func.code << 0x05
 }
 
@@ -816,7 +920,7 @@ pub fn (mut func Function) c_return() {
 }
 
 // c_end ends the block or loop with the label passed in at `label`.
-pub fn (mut func Function) c_end(label int) {
+pub fn (mut func Function) c_end(label LabelIndex) {
 	assert func.label == label, 'c_end: called with an invalid label ${label}'
 	func.label--
 	assert func.label >= 0, 'c_end: negative label index, unbalanced calls'
@@ -825,7 +929,7 @@ pub fn (mut func Function) c_end(label int) {
 
 // c_br branches to a loop or block with the label passed in at `label`.
 // WebAssembly instruction: `br`.
-pub fn (mut func Function) c_br(label int) {
+pub fn (mut func Function) c_br(label LabelIndex) {
 	v := func.label - label
 	assert v >= 0, 'c_br: malformed label index'
 	func.code << 0x0C // br
@@ -834,7 +938,7 @@ pub fn (mut func Function) c_br(label int) {
 
 // c_br_if branches to a loop or block with the label passed in at `label`, based on an i32 condition.
 // WebAssembly instruction: `br_if`.
-pub fn (mut func Function) c_br_if(label int) {
+pub fn (mut func Function) c_br_if(label LabelIndex) {
 	v := func.label - label
 	assert v >= 0, 'c_br_if: malformed label index'
 	func.code << 0x0D // br_if
@@ -847,24 +951,26 @@ pub fn (mut func Function) c_end_if() {
 }
 
 // call calls a locally defined function.
-// If this function does not exist when calling `compile` on the module, it panic.
+// If this function does not exist when calling `compile` on the module, it will panic.
 // WebAssembly instruction: `call`.
 pub fn (mut func Function) call(name string) {
-	func.call_patches << FunctionCallPatch{
+	func.code << 0x10 // call
+	func.patches << CallPatch(FunctionCallPatch{
 		name: name
 		pos: func.code.len
-	}
+	})
 }
 
 // call calls an imported function.
-// If the imported function does not exist when calling `compile` on the module, it panic.
+// If the imported function does not exist when calling `compile` on the module, it will panic.
 // WebAssembly instruction: `call`.
 pub fn (mut func Function) call_import(mod string, name string) {
-	func.call_patches << ImportCallPatch{
+	func.code << 0x10 // call
+	func.patches << CallPatch(ImportCallPatch{
 		mod: mod
 		name: name
 		pos: func.code.len
-	}
+	})
 }
 
 // load loads a value with type `typ` from memory.
@@ -1009,7 +1115,7 @@ pub fn (mut func Function) memory_grow() {
 
 // memory_init copies from a passive memory segment to the memory instance.
 // WebAssembly instruction: `memory.init`.
-pub fn (mut func Function) memory_init(idx int) {
+pub fn (mut func Function) memory_init(idx DataSegmentIndex) {
 	func.code << 0xFC
 	func.code << 0x08
 	func.u32(u32(idx))
@@ -1018,7 +1124,7 @@ pub fn (mut func Function) memory_init(idx int) {
 
 // data_drop prevents further use of a passive memory segment.
 // WebAssembly instruction: `data.drop`.
-pub fn (mut func Function) data_drop(idx int) {
+pub fn (mut func Function) data_drop(idx DataSegmentIndex) {
 	func.code << 0xFC
 	func.code << 0x09
 	func.u32(u32(idx))
@@ -1036,4 +1142,40 @@ pub fn (mut func Function) memory_copy() {
 // WebAssembly instruction: `memory.copy`.
 pub fn (mut func Function) memory_fill() {
 	func.code << [u8(0xFC), 0x0B, 0x00]
+}
+
+// ref_null places a null reference on the stack.
+// WebAssembly instruction: `ref.null`.
+pub fn (mut func Function) ref_null(rt RefType) {
+	func.code << 0xD0 // ref.null
+	func.code << u8(rt)
+}
+
+// ref_is_null checks if the reference value on the stack is null, places an i32 boolean value on the stack.
+// WebAssembly instruction: `ref_is_null`.
+pub fn (mut func Function) ref_is_null(rt RefType) {
+	func.code << 0xD1 // ref_is_null
+}
+
+// ref_func places a reference to a function with `name` on the stack.
+// If this function does not exist when calling `compile` on the module, it will panic.
+// WebAssembly instruction: `ref.func`.
+pub fn (mut func Function) ref_func(name string) {
+	func.code << 0xD2 // ref.func
+	func.patches << CallPatch(FunctionCallPatch{
+		name: name
+		pos: func.code.len
+	})
+}
+
+// ref_func_import places a reference to an imported function with `name` on the stack.
+// If the imported function does not exist when calling `compile` on the module, it will panic.
+// WebAssembly instruction: `ref.func`.
+pub fn (mut func Function) ref_func_import(mod string, name string) {
+	func.code << 0xD2 // ref.func
+	func.patches << CallPatch(ImportCallPatch{
+		mod: mod
+		name: name
+		pos: func.code.len
+	})
 }

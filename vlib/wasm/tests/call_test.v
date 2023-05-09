@@ -1,28 +1,8 @@
+module main
+
 import wasm
-import os
 
-const exe = os.find_abs_path_of_executable('wasm-validate') or { exit(0) }
-
-fn validate(mod []u8) ! {
-	mut proc := os.new_process(exe)
-	proc.set_args(['-'])
-	proc.set_redirect_stdio()
-	proc.run()
-	{
-		os.fd_write(proc.stdio_fd[0], mod.bytestr())
-		os.fd_close(proc.stdio_fd[0])
-	}
-	proc.wait()
-	if proc.status != .exited {
-		return error('wasm-validate exited abormally')
-	}
-	if proc.code != 0 {
-		return error('wasm-validate exited with a non zero exit code')
-	}
-	proc.close()
-}
-
-fn test_add() {
+fn test_call() {
 	mut m := wasm.Module{}
 	mut a1 := m.new_function('const-i32', [], [.i32_t])
 	{
@@ -81,11 +61,11 @@ fn test_add() {
 	{
 		fac.local_get(0)
 		fac.eqz(.i64_t)
-		fac.c_if([], [.i64_t])
+		ifs := fac.c_if([], [.i64_t])
 		{
 			fac.i64_const(1)
 		}
-		fac.c_else()
+		fac.c_else(ifs)
 		{
 			{
 				fac.local_get(0)
@@ -98,7 +78,7 @@ fn test_add() {
 			}
 			fac.mul(.i64_t)
 		}
-		fac.c_end_if()
+		fac.c_end(ifs)
 	}
 	m.commit(fac, true)
 
