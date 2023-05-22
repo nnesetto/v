@@ -114,7 +114,8 @@ pub struct TypeNode {
 pub:
 	pos token.Pos
 pub mut:
-	typ Type
+	typ          Type
+	end_comments []Comment // comments that after current type node
 }
 
 pub enum ComptimeTypeKind {
@@ -1296,6 +1297,7 @@ pub:
 	comments      []Comment // comment after Enumfield in the same line
 	next_comments []Comment // comments between current EnumField and next EnumField
 	has_expr      bool      // true, when .expr has a value
+	attrs         []Attr
 pub mut:
 	expr Expr // the value of current EnumField; 123 in `ename = 123`
 }
@@ -1334,7 +1336,6 @@ pub:
 	is_pub        bool
 	pos           token.Pos
 	name_pos      token.Pos
-	comments      []Comment
 	typ           Type
 	generic_types []Type
 	attrs         []Attr // attributes of type declaration
@@ -1844,6 +1845,7 @@ pub:
 	is_env       bool
 	env_pos      token.Pos
 	is_pkgconfig bool
+	or_block     OrExpr
 pub mut:
 	left_type   Type
 	result_type Type

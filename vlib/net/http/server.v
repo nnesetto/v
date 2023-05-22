@@ -76,7 +76,7 @@ pub fn (mut s Server) stop() {
 	s.state = .stopped
 }
 
-// close immediatly closes the port and signals the server that it has been closed.
+// close immediately closes the port and signals the server that it has been closed.
 [inline]
 pub fn (mut s Server) close() {
 	s.state = .closed
@@ -100,13 +100,17 @@ fn (mut s Server) parse_and_respond(mut conn net.TcpConn) {
 			reader.free()
 		}
 	}
-	req := parse_request(mut reader) or {
+	mut req := parse_request(mut reader) or {
 		$if debug {
 			// only show in debug mode to prevent abuse
 			eprintln('error parsing request: ${err}')
 		}
 		return
 	}
+
+	remote_ip := conn.peer_ip() or { '' }
+	req.header.add_custom('Remote-Addr', remote_ip) or {}
+
 	mut resp := s.handler.handle(req)
 	if resp.version() == .unknown {
 		resp.set_version(req.version)
